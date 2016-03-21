@@ -1,0 +1,267 @@
+#!/usr/bin/env python
+#
+# This script takes all eps files from DIRECTORY, and (a) converts 
+# them to png, (b) montages them on a black background, and (c) 
+# finally converts the png files into a movie compatible with fancy 
+# operating systems from apple or microsoft.
+#
+# prereqesites: linux :)
+#               python 2.x
+#               imagemagick
+#               mencoder
+#
+# (c) Jochen Klar, July 2011, AIP e-Science
+#
+# Acknowlegments to Arman Khatalayan and Kristin Riebe on whose skripts 
+# this application is based on.
+#
+# see also: 
+# http://personal.cscs.ch/~mvalle/mencoder/mencoder.html
+# http://www.mplayerhq.hu/DOCS/HTML/en/menc-feat-quicktime-7.html
+# http://lists.mplayerhq.hu/pipermail/mencoder-users/2007-October/007194.html
+#
+
+import sys,os,optparse,commands
+
+### parse the command line with optparse
+
+usage  = '''%prog DIRECTORY [-o OUTFILE] [-g WIDTHxHEIGHT] ...
+
+This script takes all eps files from DIRECTORY, and (a) converts 
+them to png, (b) montages them on a black background, and (c) 
+finally converts the png files into a movie compatible with fancy 
+operating systems from apple or microsoft.
+
+Examples: 
+       Create a movie for Linux with a square window:
+       make-a-movie <dir> -g 1024x1024
+
+       Create a movie for Linux with a lower framerate:
+       make-a-movie <dir> -f 15
+
+       Create a movie for Windows in DVD resolution:
+       make-a-movie <dir> --preset=win
+
+       Create a movie for Mac in HD resolution:
+       make-a-movie <dir> --preset=mac-hd'''
+
+# prepare optparse
+parser = optparse.OptionParser(usage=usage)
+parser.add_option('-o',action="store",dest='output',default='movie',\
+                      help='name of the output file [default: movie]')
+parser.add_option('-v',action="store_true",\
+                      help='verbose output')
+parser.add_option('-g',action="store",dest='geometry',default='768x576',\
+                      help='geometry of the frames [default: 768x576]')
+parser.add_option('-f',action="store",dest='framerate',default=30,\
+                      help='framerate of the movie [default: 30 fps]')
+parser.add_option('-m',action="store",dest='mode',default='divx5',\
+                      help='movie format [default: divx5]')
+parser.add_option('--preset',action="store",dest='preset',\
+                      help='option preset, overides GEOMETRY and MODE options [available: linux, linux-hd, win, win-hd, mac, mac-hd]')
+parser.add_option('--only-png',action="store_true",dest='pngonly',\
+                      help='only convert to png, no movie')
+parser.add_option('--only-movie',action="store_true",dest='movieonly',\
+                      help='only produce movie, no pngs')
+parser.add_option('--use-convert',action="store_true",dest='gs',\
+                      help='use convert instead of gs to produce pngs (slower, but with smoothing)')
+parser.add_option('--extend',action="store",dest='x',\
+                      help='extend the movie by using the last frame for X seconds')
+parser.add_option('--dry',action="store_true",\
+                      help='perform a dry run, no system calls are performed')
+
+# parse command line
+ppa = parser.parse_args()
+opt = ppa[0]
+arg = ppa[1]
+
+# some checks
+try:
+    epsdir = arg[0].rstrip('/')
+except IndexError:
+    parser.error('DIRECTORY is required')
+
+if opt.preset:
+    if opt.preset == 'linux':
+        opt.width,opt.height,mode = 768,576,'divx5'
+    elif opt.preset == 'linux-hd':
+        opt.width,opt.height,mode = 1920,1080,'divx5'
+    elif opt.preset == 'win':
+        opt.width,opt.height,mode = 768,576,'msmpeg4v2'
+    elif opt.preset == 'win-hd':
+        opt.width,opt.height,mode = 1920,1080,'msmpeg4v2'
+    elif opt.preset =='mac':
+        opt.width,opt.height,mode = 768,576,'h264'
+    elif opt.preset =='mac-hd':
+        opt.width,opt.height,mode = 1920,1080,'h264'
+    else:
+        parser.error('unsupported PRESET [supported: linux, linux-hd, win, win-hd, mac, mac-hd]')
+else:
+    try:
+        opt.width  = int(opt.geometry.split('x')[0])
+        opt.height = int(opt.geometry.split('x')[1])
+    except (IndexError,ValueError):
+        parser.error('geometry needs to be given in the format WIDTHxHEIGHT')
+
+    if opt.mode in ['h263p','h264','msmpeg4v2','mpeg4','divx5']:
+        mode = opt.mode
+    else:
+        parser.error('unsupported MODE [supported: mpeg4, divx5, msmpeg4v2, h263p, h264]')
+
+try:
+    fps = int(opt.framerate)
+except:
+    parser.error('FRAMERATE needs to be an integer')
+
+if opt.x:
+    try:
+        extend = int(opt.x) * fps
+    except ValueError:
+        parser.error('--extend=X must be an integer')
+else:
+    extend = None
+
+### a wrapper function for the system calls
+
+def system_call(call):
+    if opt.v: print call
+    if not opt.dry:
+        (status, output) = commands.getstatusoutput(call)
+        if status == 0:
+            return output
+        else:
+            message = 'system call exited with error %i\n' % status
+            raise RuntimeError(message)
+
+### make  lists of all the files
+
+pngdir = epsdir + '-png'
+epsfiles = []
+pngfiles = []
+
+for filename in sorted(os.listdir(epsdir)):
+    if filename.endswith('.eps'):
+        epsfile = epsdir + '/' + filename
+        pngfile = pngdir + '/' + filename.strip('.eps') + '.png'
+
+        epsfiles.append(epsfile)
+        pngfiles.append(pngfile)
+
+# check if list is empty
+if not epsfiles: parser.error('no eps files in DIRECTORY')
+
+### create a string of all the pngfile for the mencoder call
+
+# create the string
+pngstr = ','.join(pngfiles)
+
+# extend if needed
+if extend:
+    for i in range(extend): pngstr += ',' + pngfiles[-1]
+
+### loop over eps files and convert them to png
+if not opt.movieonly:
+    print 'producing pngs (this takes some time)'
+
+    # create png folder if its not there
+    try: os.mkdir(pngdir)
+    except OSError: pass
+
+    # create a black background if fixed geometry is selected
+    bgfile = pngdir + '/background.png'
+    system_call('convert -size %ix%i xc:black %s'\
+                    % (opt.width,opt.height,bgfile))
+
+    for epsfile,pngfile in zip(epsfiles,pngfiles):
+        if not opt.gs:
+            # use imagemagick's convert
+            system_call('convert -resize %ix%i -quality 100 -background white -flatten %s %s'\
+                            % (opt.width,opt.height,epsfile,pngfile))
+        else:
+            # use gs
+            # open epsfile and look for bounding box
+            f = open(epsfile,'r')
+            for line in f: 
+                if line.startswith('%%BoundingBox'):
+                    break
+            f.close()
+            split = line.split()
+            try:
+                epswidth, epsheight = int(split[3])-int(split[1]),int(split[4])-int(split[2])
+            except IndexError:
+                raise RuntimeError('could not find bounding box in eps file')
+
+            # calculate new geometry
+            wr = epswidth  / float(opt.width)
+            hr = epsheight / float(opt.height)
+
+            if wr < hr:
+                width,height = epswidth/hr,opt.height
+            elif wr > hr:
+                width,height = opt.width,epsheight/wr
+            else:
+                width,height = opt.width,opt.height
+
+            # convert the file with ghostscript
+            system_call('gs -dNOPAUSE -sDEVICE=png16m -q -dBATCH -dEPSFitPage -sOutputFile=%s -g%ix%i %s'\
+                            % (pngfile,width,height,epsfile))
+
+        # place it in front of a black background
+        system_call('composite -gravity center %s %s %s'\
+                        % (pngfile,bgfile,pngfile))
+
+### convert the png files to a movie
+
+if not opt.pngonly:
+    print 'making movie'
+
+    # compute variable bitarate (for some modes)
+    vbr    = opt.width * opt.height * 50 * 25 / 256
+
+    # do it
+    if mode == 'h263p':
+        # convert to h263p (credits Arman)
+        outmov = opt.output + '.h263p.mpeg'
+        # first pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o /dev/null -ovc lavc -lavcopts vcodec=h263p:vpass=1:vqscale=1.5:vbitrate=2160000:mbd=2:keyint=132:vqblur=1.0:cmp=2:subcmp=2:dia=2:mv0:last_pred=3 -nosound'\
+                        % (pngstr,fps))
+        # second pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o %s -ovc lavc -lavcopts vcodec=h263p:vpass=2:vqscale=1.5:vbitrate=2160000:mbd=2:keyint=132:vqblur=1.0:cmp=2:subcmp=2:dia=2:mv0:last_pred=3 -nosound'\
+                        % (pngstr,fps,outmov))
+    elif mode == 'h264':
+        # convert to h264 
+        outmov = opt.output + '.h264.mp4'
+        # first pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o /dev/null -of lavf -lavfopts format=mp4 -ovc x264 -x264encopts bitrate=4880:vbv_maxrate=5000:vbv_bufsize=5000:nocabac:me=umh:subq=6:bframes=1:trellis=1:level_idc=30:global_header:threads=2:pass=1 -nosound'\
+                        % (pngstr,fps))
+        # second pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o %s -of lavf -lavfopts format=mp4 -ovc x264 -x264encopts bitrate=4880:vbv_maxrate=5000:vbv_bufsize=5000:nocabac:me=umh:subq=6:bframes=1:trellis=1:level_idc=30:global_header:threads=2:pass=2 -nosound'\
+                        % (pngstr,fps,outmov))
+        
+    elif mode == 'msmpeg4v2':
+        # convert to msmpeg4v2 (flexible bitrate)
+        outmov = opt.output + '.msmpeg4v2.avi'
+        # first pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o /dev/null -ovc lavc -lavcopts vcodec=msmpeg4v2:vpass=1:vbitrate=%i:mbd=2:keyint=5:vqblur=1.0:cmp=2:subcmp=2:dia=2:mv0:last_pred=3 -nosound'\
+                        % (pngstr,fps,vbr))
+        # second pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o %s -ovc lavc -lavcopts vcodec=msmpeg4v2:vpass=2:vbitrate=%i:mbd=2:keyint=5:vqblur=1.0:cmp=2:subcmp=2:dia=2:mv0:last_pred=3 -nosound'\
+                        % (pngstr,fps,outmov,vbr))
+    elif mode == 'mpeg4':
+        # converts to mpeg4 (flexible bitrate)
+        outmov = opt.output + '.mpeg4.avi'
+        # first pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o /dev/null -ovc lavc -lavcopts vcodec=mpeg4:vpass=1:vbitrate=%i:mbd=2:keyint=132:v4mv:vqmin=3:lumi_mask=0.07:dark_mask=0.2:scplx_mask=0.1:tcplx_mask=0.1:naq:trell -nosound'\
+                        % (pngstr,fps,vbr))
+        # second pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o %s -ovc lavc -lavcopts vcodec=mpeg4:vpass=2:vbitrate=%i:mbd=2:keyint=132:v4mv:vqmin=3:lumi_mask=0.07:dark_mask=0.2:scplx_mask=0.1:tcplx_mask=0.1:naq:trell -nosound'\
+                        % (pngstr,fps,outmov,vbr))
+    elif mode == 'divx5':
+        # converts to divx5 (flexible bitrate)
+        outmov = opt.output + '.divx5.avi'
+        # first pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o /dev/null -ovc lavc -ffourcc DX50 -lavcopts vcodec=mpeg4:vpass=1:vbitrate=%i:vrc_eq=tex:naq:ilme:trell:cbp:preme=1:keyint=132:mbd=0:qns=1:vme=4:dia=2 -noskip -nosound'\
+                        % (pngstr,fps,vbr))
+        # second pass
+        system_call('mencoder "mf://%s" -mf fps=%i:type=png -o %s -ovc lavc -ffourcc DX50 -lavcopts vcodec=mpeg4:vpass=2:vbitrate=%i:vrc_eq=tex:naq:ilme:trell:cbp:preme=1:keyint=132:mbd=0:qns=1:vme=4:dia=2 -noskip -nosound'\
+                        % (pngstr,fps,outmov,vbr))
